@@ -1,24 +1,50 @@
 #include <SFML/Graphics.hpp>
 #include  <olcUTIL_Geometry2D.h>
 #include <vector>
+#include <algorithm>
+#include <memory>
 using namespace olc::utils::geom2d;
+
+sf::Texture playerTex;
+sf::Texture tileTex;
+
+enum class TexType
+{
+	Player,
+	Tile,
+	NotSet
+};
 
 struct rec
 {
-	olc::vf2d pos;
-	olc::vf2d size;
+	olc::vf2d pos{};
+	olc::vf2d size{};
+	TexType texType{ TexType::NotSet };
+	olc::vf2d vel{};
+	rec() = default;
+	~rec() = default;
+	rec(const rec&) = default;
+	rec(rec&&) = default;
+	rec& operator=(const rec&) = default;
+	rec& operator=(rec&&) = default;
+	inline void set(olc::vf2d pos_, olc::vf2d size_, TexType texType_, olc::vf2d vel_ = { 0.f,0.f })
+	{
+		pos = pos_;
+		size = size_;
+		texType = texType_;
+		vel = vel_;
+	}
 };
 
 struct aRay
 {
 	olc::vf2d origin;
 	olc::vf2d endPt;
-	aRay(olc::vf2d start,  olc::vf2d end)
+	aRay(olc::vf2d start, olc::vf2d end)
 	{
 		origin = start;
 		endPt = end;
 	}
-
 	olc::vf2d D()
 	{
 		return endPt - origin;
@@ -29,10 +55,29 @@ struct aRay
 	}
 	olc::vf2d dir()
 	{
-		return { D().x / D().mag(), D().y / D().mag() };
+		return D().norm();
 	}
-	
 };
+
+std::unique_ptr<sf::Sprite> spr(const rec& r)
+{
+	std::unique_ptr<sf::Sprite> sprite = std::make_unique<sf::Sprite>();
+	switch (r.texType)
+	{
+	case TexType::Player:
+		sprite->setTexture(playerTex);
+		break;
+	case TexType::Tile:
+		sprite->setTexture(tileTex);
+		break;
+	default:
+		break;
+	}
+	sprite->setPosition({ r.pos.x, r.pos.y });
+	sprite->setTextureRect({ {0, 0},{(int)r.size.x, (int)r.size.y} });
+	return std::move(sprite);
+}		
+
 
 bool PointVsRect(const olc::vf2d& p, const rec& r)
 {
@@ -48,20 +93,15 @@ bool RayVsRect(const olc::vf2d& ray_origin, const olc::vf2d& ray_dir, const rec&
 {
 	olc::vf2d t_near = (target.pos - ray_origin) / ray_dir;
 	olc::vf2d t_far = (target.pos +target.size - ray_origin) / ray_dir;
-
+	if (std::isnan(t_far.y) || std::isnan(t_far.x)) return false;
+	if (std::isnan(t_near.y) || std::isnan(t_near.x)) return false;
 	if (t_near.x > t_far.x) std::swap(t_near.x, t_far.x);
 	if (t_near.y > t_far.y) std::swap(t_near.y, t_far.y);
-
 	if (t_near.x > t_far.y || t_near.y > t_far.x) return false;
-
 	t_hit_near = std::max(t_near.x, t_near.y);
 	float t_hit_far = std::min(t_far.x, t_far.y);
-
 	if (t_hit_far < 0) return false;
-
-
 	contact_point = ray_origin + t_hit_near * ray_dir;
-
 	if (t_near.x > t_near.y)
 	{
 		if (ray_dir.x < 0)
@@ -84,46 +124,59 @@ bool RayVsRect(const olc::vf2d& ray_origin, const olc::vf2d& ray_dir, const rec&
 			contact_normal = { 0, -1 };
 		}
 	}
-
 	return true;
-
-
-
-
 }
 
+bool DynamicRectVsRect(const rec& in, const rec& target, olc::vf2d& contact_point, olc::vi2d& contact_normal, float& contact_time, float fElapsedTime)
+{
+	if (in.vel.x == 0 && in.vel.y == 0)
+	{
+		return false;
+	}
+	rec expanded_target;
+	expanded_target.pos = target.pos - in.size / 2.f;
+	expanded_target.size = target.size + in.size;
+	if (RayVsRect(in.pos + in.size / 2.f, in.vel * fElapsedTime, expanded_target, contact_point, contact_normal, contact_time))
+	{
+		if (contact_time <= 1.0f && contact_time >= 0.f)
+			return true;
+	}
+	return false;
+}
 int main()
 {
-
-	
-
-
 	sf::RenderWindow wnd{ {1600U,900U,32U}, "Collisions" };
-
-
-	sf::Texture tileTex;
+	playerTex.loadFromFile("assets/player.png");
 	tileTex.loadFromFile("assets/tileset.png");
-	std::vector<sf::Sprite> tiles;
-	tiles.clear();
-	for (int i = 0; i < 20; i++)
+	std::vector<rec> objs;
+	objs.clear();
 	{
-		tiles.emplace_back(sf::Sprite{});
-		tiles.back().setPosition({ ((float)i  * 64.f) + 200.f, 900.f - 64.f });
-		tiles.back().setTextureRect({ {0, 0},{64,64} });
-		tiles.back().setTexture(tileTex);
+		rec pr;
+		pr.set({ 400.f, 400.f }, { 124.f, 180.f }, TexType::Player, { 0.f,0.f });
+		objs.push_back(pr);
 	}
-	sf::Vector2i iMouse;
+	objs.reserve(static_cast<std::vector<rec, std::allocator<rec>>::size_type>(1) + 30);
+	for (int i = 1; i < 20; i++)
+	{
+		objs.emplace_back(rec{});
+		objs[i].set({ ((float)i * 64.f) + 200.f, 900.f - 256.f }, { 64.f,64.f }, TexType::Tile, { 0.f,0.f });
+	}
+	for (int i = 20; i < 25; i++)
+	{
+		objs.emplace_back(rec{});
+		objs[i].set({ 200.f,  900.f - 256.f - (((i-20) + 1) * 64.f) }, { 64.f,64.f }, TexType::Tile, { 0.f,0.f });
+	}
+	for (int i = 25; i < 30; i++)
+	{
+		objs.emplace_back(rec{});
+		objs[i].set({ 200.f + (19.f * 64.f),  900.f - 256.f - (((i-25) + 1) * 64.f) }, { 64.f,64.f }, TexType::Tile, { 0.f,0.f });
+	}
 	olc::vf2d mpos;
-	
-	
-
+	float dt = 0;
+	sf::Clock frameTimer;
 	while (wnd.isOpen())
 	{
-		
-
-	
-
-	
+		dt = frameTimer.restart().asSeconds();
 		sf::Event e;
 		while (wnd.pollEvent(e))
 		{
@@ -134,80 +187,46 @@ int main()
 		}
 		if (wnd.isOpen())
 		{
-			iMouse = sf::Mouse::getPosition(wnd);
-			mpos = olc::vf2d{ (float)iMouse.x, (float)iMouse.y };
-			rec r = { { 100.f*4, 100.f*4}, {50.f*4, 30.f*4} };
-			aRay myRay{ {20.f,20.f}, {mpos} };
-			
+			mpos = olc::vf2d{ (float)sf::Mouse::getPosition(wnd).x, (float)sf::Mouse::getPosition(wnd).y };
+			aRay myRay{ {objs[0].pos}, {mpos}};
+			if (sf::Mouse::isButtonPressed(sf::Mouse::Left))
+			{
+				objs[0].vel += myRay.dir() * 100.f * dt;
+			}
 			olc::vf2d cp;
 			olc::vi2d cn;
-			float t;
-
-			sf::Color col = sf::Color::White;
-
-			bool collided = false;
-			if (RayVsRect(myRay.orig(), myRay.D(), r, cp, cn, t) && t < 1.0f)
+			float ct;
+			std::vector<std::pair<int, float> > z;
+			for (int i = 1; i < objs.size(); i++)
 			{
-				col = sf::Color::Yellow;
-				collided = true;
-
+				rec target;
+				target.set({ objs[i].pos.x, objs[i].pos.y }, { 64.f, 64.f }, TexType::NotSet, { 0.f,0.f });
+				if (DynamicRectVsRect(objs[0], target, cp, cn, ct, dt))
+				{
+					z.push_back({ i, ct });		
+				}
 			}
-			else
+			std::sort(z.begin(), z.end(), [](const std::pair<int, float>& a, const std::pair<int, float>& b)
+				{
+					return a.second < b.second;
+				});
+			for (auto j : z)
 			{
-				col = sf::Color::White;
+				rec target;
+				target.set({ objs[j.first].pos.x, objs[j.first].pos.y }, { 64.f, 64.f }, TexType::NotSet, { 0.f,0.f });
+				if (DynamicRectVsRect(objs[0], target, cp, cn, ct, dt))
+				{
+					objs[0].vel += cn * olc::vf2d{std::abs(objs[0].vel.x), std::abs(objs[0].vel.y)} *(1 - ct);
+				}
 			}
+			objs[0].pos += objs[0].vel * dt;
 
 			wnd.clear();
-
-			for (auto& t : tiles)
+			for (auto& o : objs)
 			{
-				wnd.draw(t);
+				wnd.draw(*spr(o));
 			}
-
-			sf::RectangleShape shp({ r.size.x, r.size.y});
-			shp.setOutlineColor(col);
-			shp.setPosition({ r.pos.x, r.pos.y});
-			shp.setOutlineThickness(2);
-			shp.setFillColor(sf::Color::Transparent);
-
-			wnd.draw(shp);
-
-			if (collided)
-			{
-				sf::CircleShape cShp{ 12.f };
-				cShp.setFillColor(sf::Color::Red);
-				cShp.setOutlineColor(sf::Color::Transparent);
-				cShp.setPosition({cp.x, cp.y});
-				cShp.setOrigin({ cShp.getRadius() + shp.getOutlineThickness() / 2.f, cShp.getRadius() + shp.getOutlineThickness() / 2.f});
-				wnd.draw(cShp);
-
-				sf::RectangleShape nshp({(cn.x != 0) ? 40.f * cn.x :  0.f, (cn.y != 0) ? 40.f * cn.y : 0.f });
-				nshp.setOutlineColor(sf::Color::White);
-			   nshp.setPosition({ cp.x,cp.y });
-				nshp.setOutlineThickness(2);
-				nshp.setFillColor(sf::Color::Transparent);
-				wnd.draw(nshp);
-			}
-
-
-			sf::VertexArray lShp{ sf::PrimitiveType::Lines, 2Ui64 };
-			lShp[0].position = { myRay.orig().x,   myRay.orig().y };
-			lShp[0].color = sf::Color::White;
-			lShp[0].position = { myRay.endPt.x, myRay.endPt.y };
-			lShp[0].color = sf::Color::White;
-
-			wnd.draw(lShp);
-
-			//sf::RectangleShape shp2({ s.size.x, s.size.y });
-			//shp2.setOutlineColor(sf::Color::Green);
-			//shp2.setPosition({ s.pos.x, s.pos.y });
-			//shp2.setOutlineThickness(2);
-			//shp2.setFillColor(sf::Color::Transparent);
-
-			//wnd.draw(shp2);
-
 			wnd.display();
-
 		}
 	}
 }
